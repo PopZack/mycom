@@ -14,6 +14,7 @@ sentence-transformers>=3.0.0
 
 # 关键词检索（纯 Python，无需 ES）
 rank-bm25>=0.2.2
+jieba>=0.42.1
 
 # LLM 调用（兼容 OpenAI API 格式）
 openai>=1.40.0

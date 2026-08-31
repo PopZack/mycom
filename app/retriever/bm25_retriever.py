@@ -45,10 +45,14 @@ class BM25Retriever:
             ]
         """
         self._docs = faq_list
-        # 对每条 FAQ 的 question + answer 拼接后分词
+        # 对每条 FAQ 的 question + variations + answer 拼接后分词
+        # （纳入变体文本，让不同问法的关键词都能命中同一条 FAQ）
         corpus = []
         for item in faq_list:
-            text = (item.get("question", "") + " " + item.get("answer", ""))
+            parts = [item.get("question", "")]
+            parts.extend(item.get("variations", []))
+            parts.append(item.get("answer", ""))
+            text = " ".join(p for p in parts if p)
             corpus.append(_tokenize(text))
 
         self._bm25 = BM25Okapi(corpus)

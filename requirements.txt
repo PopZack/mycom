@@ -1,0 +1,25 @@
+# Phase 1 - FAQ 静态知识链路 MVP
+
+# Web 框架
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.8.0
+pydantic-settings>=2.3.0
+
+# Milvus 向量库
+pymilvus>=2.4.0
+
+# Embedding（本地轻量模型，首次运行会下载 ~40MB）
+sentence-transformers>=3.0.0
+
+# 关键词检索（纯 Python，无需 ES）
+rank-bm25>=0.2.2
+
+# LLM 调用（兼容 OpenAI API 格式）
+openai>=1.40.0
+
+# 工具
+python-dotenv>=1.0.0
+httpx>=0.27.0
+loguru>=0.7.2
+numpy>=1.26.0

@@ -22,20 +22,21 @@ from loguru import logger
 from app.config import settings
 from app.retriever.faq_retriever import FAQRetriever
 from app.retriever.milvus_client import MilvusClientManager, MilvusNotReadyError
-from app.answer_agent import AnswerAgent
 from app.chains.faq_chain import FAQChain
+from app.agent.agent_chain import AgentChain
+from app.agent.router import Router
 
 
 # ---- 全局单例（启动时初始化一次）----
 _retriever: FAQRetriever | None = None
-_agent: AnswerAgent | None = None
-_chain: FAQChain | None = None
+_faq_chain: FAQChain | None = None
+_agent_chain: AgentChain | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """启动时懒加载核心组件"""
-    global _retriever, _agent, _chain
+    global _retriever, _faq_chain, _agent_chain
     logger.info("=" * 50)
     logger.info("🚀 mycom FAQ 智能问答服务启动中...")
     logger.info(f"   Milvus: {settings.MILVUS_HOST}:{settings.MILVUS_PORT}")
@@ -44,7 +45,7 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 50)
 
     try:
-        _chain = FAQChain()
+        _agent_chain = AgentChain()
         logger.success("✅ 服务就绪 ✓")
     except Exception as e:
         logger.error(f"❌ 启动失败: {e}")
@@ -84,9 +85,11 @@ class SourceItem(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
-    sources: list[SourceItem]
+    sources: list[SourceItem] = []
     fallback: bool = False
+    intent: str = "faq"
     note: Optional[str] = None
+    need_slot: Optional[str] = None
     debug: Optional[dict] = None
 
 
@@ -104,10 +107,11 @@ def health():
         milvus_msg = str(e)
 
     return {
-        "status": "ok" if _chain is not None else "starting",
+        "status": "ok" if _agent_chain is not None else "starting",
         "milvus": milvus_ok,
         "milvus_detail": milvus_msg,
         "llm_configured": bool(settings.LLM_API_KEY),
+        "phase": "Phase 2 - Agent Router",
         "embedding_model": settings.EMBEDDING_MODEL,
         "collection": settings.MILVUS_COLLECTION,
     }
@@ -116,24 +120,27 @@ def health():
 @app.post("/chat", response_model=ChatResponse, tags=["问答"])
 def chat(req: ChatRequest):
     """
-    FAQ 问答主入口
+    FAQ 问答主入口（Phase 2: Agent 路由 → FAQ/工单/闲聊）
 
     示例:
         curl -X POST http://localhost:8000/chat \
           -H "Content-Type: application/json" \
           -d '{"query": "如何退款?", "include_debug": true}'
     """
-    if _chain is None:
+    if _agent_chain is None:
         raise HTTPException(status_code=503, detail="服务尚未就绪，请稍后再试")
 
-    result = _chain.run(req.query, include_debug=req.include_debug)
+    result = _agent_chain.run(req.query, include_debug=req.include_debug)
 
-    # 转成 Pydantic 兼容格式
     response = ChatResponse(
         answer=result["answer"],
-        sources=[SourceItem(**s) for s in result["sources"]],
+        sources=[SourceItem(**s) if isinstance(s, dict) and "question" in s
+                 else SourceItem(question=str(s.get("product", s.get("order_id", ""))))
+                 for s in result.get("sources", [])],
         fallback=result.get("fallback", False),
+        intent=result.get("intent", "faq"),
         note=result.get("note"),
+        need_slot=result.get("need_slot"),
         debug=result.get("debug"),
     )
     return response
@@ -148,10 +155,10 @@ def candidates(query: str, top_k: int = 5):
         curl "http://localhost:8000/candidates?query=如何退款&top_k=3"
     """
     if _retriever is None:
-        # FAQChain 初始化时会同时初始化 retriever
-        if _chain is None:
+        # AgentChain 初始化时会同时初始化 FAQ 链路的 retriever
+        if _agent_chain is None:
             raise HTTPException(status_code=503, detail="服务尚未就绪")
-        retriever = _chain._retriever
+        retriever = _agent_chain._faq._retriever
     else:
         retriever = _retriever
 
@@ -162,9 +169,24 @@ def candidates(query: str, top_k: int = 5):
 @app.get("/", tags=["系统"])
 def root():
     return {
-        "name": "mycom FAQ 智能问答",
-        "version": "0.1.0",
-        "phase": "Phase 1 - FAQ MVP",
+        "name": "mycom 智能问答",
+        "version": "0.2.0",
+        "phase": "Phase 2 - Agent Router",
         "docs": "/docs",
         "health": "/health",
+        "routes": ["/chat", "/candidates", "/route"],
     }
+
+
+@app.get("/route", tags=["调试"])
+def route_query(query: str):
+    """
+    调试端点：查看路由结果（不执行链路，只看意图判断）
+
+    示例:
+        curl "http://localhost:8000/route?query=帮我查一下订单123456789"
+    """
+    if _agent_chain is None:
+        raise HTTPException(status_code=503, detail="服务尚未就绪")
+    route = _agent_chain._router.route(query)
+    return {"query": query, "route": route.to_dict()}

@@ -1,6 +1,15 @@
 """
 统一配置管理 —— 从 .env 读取，带类型校验
 """
+import os
+
+# 必须在 import 任何第三方 ML 库之前设置环境变量
+# 使用国内 HuggingFace 镜像，修复连接超时（WinError 10060）
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:64")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 

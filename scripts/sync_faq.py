@@ -28,8 +28,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
+
+# 必须在 import torch/sentence_transformers 之前设置，限制 PyTorch 虚拟内存预留
+# 修复 Windows os error 1455（页面文件太小）
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:64")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")  # 避免多进程 fork 内存翻倍
+os.environ.setdefault("OMP_NUM_THREADS", "2")              # 限制 OpenMP 线程数，减少内存占用
+# 使用国内 HuggingFace 镜像，修复连接超时（WinError 10060）
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 from loguru import logger
 from sentence_transformers import SentenceTransformer
@@ -89,11 +98,19 @@ def build_target_rows(faq_list: list[dict], model: SentenceTransformer) -> list[
     if not texts:
         return []
 
-    vectors = model.encode(
-        texts,
-        normalize_embeddings=True,
-        show_progress_bar=len(texts) > 50,
-    )
+    # 分批编码，避免一次性占用过多内存（修复 Windows 页面文件不足）
+    BATCH_SIZE = 16
+    vectors = []
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch = texts[i : i + BATCH_SIZE]
+        vecs = model.encode(
+            batch,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        vectors.extend(vecs)
+    if len(texts) > 50:
+        logger.info(f"   向量化完成: {len(vectors)} 条")
     for meta, vec in zip(metas, vectors):
         meta["vector"] = vec.tolist()
     return metas

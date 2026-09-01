@@ -9,9 +9,11 @@ import json
 from typing import List, Dict, Any, Optional
 
 from loguru import logger
+
+# 必须先 import config（它会设置 HF_ENDPOINT 等环境变量），再 import sentence_transformers
+from app.config import settings
 from sentence_transformers import SentenceTransformer
 
-from app.config import settings
 from app.retriever.milvus_client import MilvusClientManager, MilvusNotReadyError
 from app.retriever.bm25_retriever import BM25Retriever
 from app.retriever.hybrid_search import rrf_fuse

@@ -122,6 +122,7 @@ class MilvusClientManager:
 
         if client.has_collection(col_name):
             logger.info(f"[Milvus] collection '{col_name}' 已存在，跳过创建")
+            self._ensure_loaded(col_name)
             return
 
         schema = CollectionSchema(
@@ -158,6 +159,17 @@ class MilvusClientManager:
             index_params=index_params,
         )
         logger.success(f"[Milvus] collection '{col_name}' 创建完成 (dim={dim}, HNSW) ✓")
+        self._ensure_loaded(col_name)
+
+    def _ensure_loaded(self, col_name: str) -> None:
+        """加载 collection 到内存（Milvus 2.4+ 查询/检索前必须 load）"""
+        client = self.ensure_ready()
+        try:
+            client.load_collection(collection_name=col_name)
+            logger.info(f"[Milvus] collection '{col_name}' 已加载到内存")
+        except Exception as e:
+            # 已加载的情况下重复 load 会抛异常，忽略即可
+            logger.debug(f"[Milvus] load_collection 跳过: {e}")
 
     # ---- 增量同步支撑 ----
     def get_current_hashes(self) -> Dict[int, str]:
@@ -243,7 +255,7 @@ class MilvusClientManager:
             collection_name=settings.MILVUS_COLLECTION,
             data=[query_vector],
             anns_field="vector",
-            param={"metric_type": "COSINE", "params": {"ef": 64}},
+            search_params={"metric_type": "COSINE", "params": {"ef": 64}},
             limit=top_k,
             filter=filter_expr,
             output_fields=["faq_id", "question", "answer", "category"],

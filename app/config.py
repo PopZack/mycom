@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "deepseek-chat"
     LLM_TEMPERATURE: float = 0.3
 
+    # 业务数据：true=mock（开发期），false=调用真实 API
+    USE_MOCK_DATA: bool = True
+
     # 检索参数
     VECTOR_TOP_K: int = 8
     BM25_TOP_K: int = 8

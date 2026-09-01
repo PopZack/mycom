@@ -1,12 +1,13 @@
 """
 工单链路 —— 处理动态业务操作（查订单、查物流、申请退款）
 
-Phase 2.1 阶段使用 mock 数据模拟业务接口：
-  - 3 条 mock 订单（覆盖不同状态）
-  - 规则匹配业务子意图（查订单/查物流/退款）
-  - 有 LLM 时用 LLM 理解更复杂的表达
+Phase 2.2-A 升级为工具化架构：
+  - 业务操作封装为 Tool（app/tools/）
+  - LLM 路径：Function Calling，让 LLM 自动选工具 + 抽参数
+  - 规则路径：_detect_subintent 选工具 → ToolRegistry.call() 执行
+  - 无 key 时降级为规则路径，保证可用
 
-Phase 2.2 会升级为真正的 Function Calling + 外部 API 调用
+数据层（app/services/）通过 USE_MOCK_DATA 切换 mock / real。
 """
 from __future__ import annotations
 
@@ -16,49 +17,35 @@ from loguru import logger
 from openai import OpenAI
 
 from app.config import settings
+from app.tools.registry import get_tool_registry
+from app.tools.base import ToolResult
 
-# ---- Mock 业务数据（模拟数据库/API 返回）----
-MOCK_ORDERS: Dict[str, Dict[str, Any]] = {
-    "123456789": {
-        "order_id": "123456789",
-        "status": "已发货",
-        "product": "无线蓝牙耳机",
-        "amount": 299.00,
-        "logistics": "顺丰快递 SF1234567890",
-        "logistics_status": "运输中，预计明天送达",
-        "created_at": "2026-08-28 14:30",
-    },
-    "987654321": {
-        "order_id": "987654321",
-        "status": "待发货",
-        "product": "智能手表",
-        "amount": 899.00,
-        "logistics": None,
-        "logistics_status": "尚未发货，预计 1-2 天内发出",
-        "created_at": "2026-08-30 09:15",
-    },
-    "555666777": {
-        "order_id": "555666777",
-        "status": "已完成",
-        "product": "充电宝 20000mAh",
-        "amount": 159.00,
-        "logistics": "京东快递 JD55566677701",
-        "logistics_status": "已签收",
-        "created_at": "2026-08-20 16:45",
-    },
+
+# 子意图 → 工具名映射
+SUBINTENT_TO_TOOL = {
+    "query_order": "query_order",
+    "query_logistics": "query_logistics",
+    "refund": "apply_refund",
 }
 
-# 业务子意图关键词
+# 业务子意图关键词（规则路径用）
 SUBINTENT_KEYWORDS = {
     "query_order": ["订单状态", "订单", "查订单", "订单情况"],
     "query_logistics": ["物流", "快递", "到哪", "什么时候到", "送达", "签收"],
     "refund": ["退款", "退货", "退钱", "取消订单"],
 }
 
+# 无订单号时的引导话术（LLM 路径也会用到）
+ASK_ORDER_ID_MSG = (
+    "请问您要查询的订单号是多少呢？\n"
+    "您可以在「我的订单」中找到订单号（通常为 9-12 位数字），"
+    "直接告诉我订单号即可帮您查询。"
+)
+
 
 class TicketChain:
     """
-    工单链路
+    工单链路（工具化版）
 
     用法:
         chain = TicketChain()
@@ -66,15 +53,16 @@ class TicketChain:
     """
 
     def __init__(self):
+        self._registry = get_tool_registry()
         self._client: Optional[OpenAI] = None
         if settings.LLM_API_KEY:
             self._client = OpenAI(
                 api_key=settings.LLM_API_KEY,
                 base_url=settings.LLM_BASE_URL,
             )
-            logger.success("[Ticket] LLM 工单链路已启用")
+            logger.success("[Ticket] LLM Function Calling 已启用")
         else:
-            logger.info("[Ticket] 使用规则工单链路（无 LLM）")
+            logger.info("[Ticket] 使用规则工单链路（无 LLM，走 tools 规则路径）")
 
     def run(self, query: str, slots: Optional[dict] = None) -> Dict[str, Any]:
         """
@@ -91,18 +79,20 @@ class TicketChain:
         if not order_id:
             return self._ask_for_order_id(query)
 
-        # 有订单号 → 查询 mock 数据
-        order = MOCK_ORDERS.get(order_id)
-        if not order:
-            return self._order_not_found(order_id)
-
-        # 识别子意图
-        subintent = self._detect_subintent(query)
-
-        # 生成回复
+        # 有订单号 → 选路径执行
         if self._client is not None:
-            return self._reply_with_llm(query, order, subintent)
-        return self._reply_with_rules(query, order, subintent)
+            return self._reply_with_function_calling(query, order_id)
+        return self._reply_with_rules(query, order_id)
+
+    # ---- 规则路径：子意图匹配 → 工具调用 ----
+    def _reply_with_rules(self, query: str, order_id: str) -> Dict[str, Any]:
+        """规则路径：用 _detect_subintent 选工具，调用 ToolRegistry"""
+        subintent = self._detect_subintent(query)
+        tool_name = SUBINTENT_TO_TOOL.get(subintent, "query_order")
+        logger.info(f"[Ticket:rule] subintent={subintent} → tool={tool_name}")
+
+        result = self._registry.call(tool_name, {"order_id": order_id})
+        return self._format_result(result, subintent)
 
     def _detect_subintent(self, query: str) -> str:
         """识别业务子意图：query_order / query_logistics / refund
@@ -119,104 +109,127 @@ class TicketChain:
         # 3. 最后兜底查订单
         return "query_order"
 
+    # ---- LLM 路径：Function Calling ----
+    def _reply_with_function_calling(self, query: str, order_id: str) -> Dict[str, Any]:
+        """LLM Function Calling：让 LLM 选工具 + 抽参数"""
+        tools_schema = self._registry.tools_schema()
+        system_prompt = (
+            "你是电商客服助手。根据用户问题调用合适的工具查询业务信息，"
+            "然后用简洁自然的中文回答用户。\n"
+            f"已知订单号：{order_id}\n"
+            "注意：必须通过调用工具获取数据，不要编造订单信息。"
+        )
+
+        try:
+            # 第一轮：让 LLM 决定调用哪个工具
+            resp = self._client.chat.completions.create(
+                model=settings.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": query},
+                ],
+                tools=tools_schema,
+                tool_choice="auto",
+                temperature=0.2,
+                max_tokens=512,
+            )
+            msg = resp.choices[0].message
+
+            # LLM 没调工具 → 直接返回文本回复
+            if not msg.tool_calls:
+                logger.info("[Ticket:llm] LLM 未调用工具，直接回复")
+                return {
+                    "answer": (msg.content or "").strip() or ASK_ORDER_ID_MSG,
+                    "sources": [{"order_id": order_id}],
+                    "fallback": False,
+                    "intent": "ticket",
+                    "tool_used": None,
+                }
+
+            # 执行工具调用（支持多个 tool_calls，逐个执行）
+            tool_results: list[ToolResult] = []
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query},
+                msg,
+            ]
+            for tc in msg.tool_calls:
+                tool_name = tc.function.name
+                logger.info(f"[Ticket:llm] LLM 调用工具: {tool_name}, args={tc.function.arguments}")
+                tr = self._registry.call_from_json(tool_name, tc.function.arguments)
+                tool_results.append(tr)
+                # 把工具结果回填给 LLM
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tr.message if tr.success else f"查询失败：{tr.message}",
+                })
+
+            # 第二轮：把工具结果交给 LLM 生成自然语言回复
+            final_resp = self._client.chat.completions.create(
+                model=settings.LLM_MODEL,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=512,
+            )
+            answer = final_resp.choices[0].message.content.strip()
+
+            # 取第一个工具结果作为 sources/元信息
+            primary = tool_results[0]
+            subintent = self._tool_name_to_subintent(primary.tool_name)
+            return {
+                "answer": answer,
+                "sources": [{"order_id": order_id}],
+                "fallback": False,
+                "intent": "ticket",
+                "subintent": subintent,
+                "tool_used": primary.tool_name,
+                "tool_success": primary.success,
+            }
+        except Exception as e:
+            logger.warning(f"[Ticket:llm] Function Calling 失败，降级规则: {e}")
+            return self._reply_with_rules(query, order_id)
+
+    # ---- 辅助方法 ----
+    def _format_result(self, result: ToolResult, subintent: str) -> Dict[str, Any]:
+        """把 ToolResult 格式化为链路统一输出"""
+        if not result.success:
+            # 订单未找到等失败场景
+            return {
+                "answer": result.message,
+                "sources": [],
+                "fallback": False,
+                "intent": "ticket",
+                "subintent": subintent,
+                "tool_used": result.tool_name,
+                "tool_success": False,
+            }
+        order_id = result.data.get("order_id", "")
+        product = result.data.get("product", "")
+        return {
+            "answer": result.message,
+            "sources": [{"order_id": order_id, "product": product}],
+            "fallback": False,
+            "intent": "ticket",
+            "subintent": subintent,
+            "tool_used": result.tool_name,
+            "tool_success": True,
+        }
+
     def _ask_for_order_id(self, query: str) -> Dict[str, Any]:
         """引导用户提供订单号"""
         return {
-            "answer": (
-                "请问您要查询的订单号是多少呢？\n"
-                "您可以在「我的订单」中找到订单号（通常为 9-12 位数字），"
-                "直接告诉我订单号即可帮您查询。"
-            ),
+            "answer": ASK_ORDER_ID_MSG,
             "sources": [],
             "fallback": False,
             "intent": "ticket",
             "need_slot": "order_id",
         }
 
-    def _order_not_found(self, order_id: str) -> Dict[str, Any]:
-        """订单未找到"""
-        return {
-            "answer": (
-                f"抱歉，未找到订单号为 {order_id} 的订单。\n"
-                "请确认订单号是否正确，或联系人工客服协助查询。"
-            ),
-            "sources": [],
-            "fallback": False,
-            "intent": "ticket",
-        }
-
-    def _reply_with_rules(self, query: str, order: dict, subintent: str) -> Dict[str, Any]:
-        """规则生成回复（无 LLM 时）"""
-        oid = order["order_id"]
-        product = order["product"]
-        status = order["status"]
-        amount = order["amount"]
-
-        if subintent == "query_logistics":
-            logistics = order.get("logistics", "无")
-            logistics_status = order.get("logistics_status", "未知")
-            answer = (
-                f"订单 {oid}（{product}）物流信息：\n"
-                f"  快递：{logistics}\n"
-                f"  状态：{logistics_status}"
-            )
-        elif subintent == "refund":
-            answer = (
-                f"订单 {oid}（{product}）当前状态：{status}\n"
-                f"如需退款，请在「我的订单」中点击「申请退款」。\n"
-                f"已发货订单需先拒收，已签收订单需走退货流程。"
-            )
-        else:  # query_order
-            answer = (
-                f"订单 {oid} 详情：\n"
-                f"  商品：{product}\n"
-                f"  金额：¥{amount:.2f}\n"
-                f"  状态：{status}\n"
-                f"  下单时间：{order['created_at']}"
-            )
-
-        return {
-            "answer": answer,
-            "sources": [{"order_id": oid, "product": product}],
-            "fallback": False,
-            "intent": "ticket",
-            "subintent": subintent,
-            "mock_data": True,
-        }
-
-    def _reply_with_llm(self, query: str, order: dict, subintent: str) -> Dict[str, Any]:
-        """用 LLM 生成更自然的回复"""
-        order_info = (
-            f"订单号：{order['order_id']}\n"
-            f"商品：{order['product']}\n"
-            f"金额：¥{order['amount']:.2f}\n"
-            f"状态：{order['status']}\n"
-            f"快递：{order.get('logistics', '无')}\n"
-            f"物流状态：{order.get('logistics_status', '未知')}\n"
-            f"下单时间：{order['created_at']}"
-        )
-        prompt = (
-            f"用户问题：{query}\n\n"
-            f"订单信息：\n{order_info}\n\n"
-            f"识别到的子意图：{subintent}\n"
-            f"请基于订单信息，用简洁自然的语气回答用户问题。使用中文。"
-        )
-        try:
-            resp = self._client.chat.completions.create(
-                model=settings.LLM_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=512,
-            )
-            answer = resp.choices[0].message.content.strip()
-            return {
-                "answer": answer,
-                "sources": [{"order_id": order["order_id"], "product": order["product"]}],
-                "fallback": False,
-                "intent": "ticket",
-                "subintent": subintent,
-                "mock_data": True,
-            }
-        except Exception as e:
-            logger.warning(f"[Ticket] LLM 调用失败，降级规则: {e}")
-            return self._reply_with_rules(query, order, subintent)
+    @staticmethod
+    def _tool_name_to_subintent(tool_name: str) -> str:
+        """工具名反查子意图（调试/日志用）"""
+        for sub, tool in SUBINTENT_TO_TOOL.items():
+            if tool == tool_name:
+                return sub
+        return "unknown"

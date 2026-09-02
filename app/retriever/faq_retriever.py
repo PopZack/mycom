@@ -43,9 +43,12 @@ class FAQRetriever:
         self._milvus = MilvusClientManager()
         self._bm25 = BM25Retriever()
 
-        # 1. 加载 Embedding 模型
+        # 1. 加载 Embedding 模型（强制 CPU，避免 CUDA 初始化占用额外内存触发 os error 1455）
         logger.info(f"[FAQ] 加载 Embedding 模型: {settings.EMBEDDING_MODEL}")
-        self._embed_model = SentenceTransformer(settings.EMBEDDING_MODEL)
+        self._embed_model = SentenceTransformer(
+            settings.EMBEDDING_MODEL,
+            device="cpu",
+        )
         logger.success("[FAQ] Embedding 模型加载完成 ✓")
 
         # 2. 加载 FAQ 数据

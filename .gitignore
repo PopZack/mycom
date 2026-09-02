@@ -30,3 +30,9 @@ logs/
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# 评测运行产物（动态生成，不需要版本控制）
+eval_result.txt
+eval_single.txt
+eval_stderr.txt
+eval_stdout.txt

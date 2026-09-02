@@ -75,6 +75,7 @@ app.add_middleware(
 # ---- Schema ----
 class ChatRequest(BaseModel):
     query: str = Field(..., description="用户问题", min_length=1, max_length=500)
+    session_id: Optional[str] = Field(None, description="会话ID（多轮对话记忆，不传则无记忆）", max_length=64)
     include_debug: bool = Field(True, description="是否返回调试信息")
 
 
@@ -88,6 +89,7 @@ class ChatResponse(BaseModel):
     sources: list[SourceItem] = []
     fallback: bool = False
     intent: str = "faq"
+    session_id: Optional[str] = None
     note: Optional[str] = None
     need_slot: Optional[str] = None
     debug: Optional[dict] = None
@@ -130,7 +132,7 @@ def chat(req: ChatRequest):
     if _agent_chain is None:
         raise HTTPException(status_code=503, detail="服务尚未就绪，请稍后再试")
 
-    result = _agent_chain.run(req.query, include_debug=req.include_debug)
+    result = _agent_chain.run(req.query, include_debug=req.include_debug, session_id=req.session_id)
 
     response = ChatResponse(
         answer=result["answer"],
@@ -139,6 +141,7 @@ def chat(req: ChatRequest):
                  for s in result.get("sources", [])],
         fallback=result.get("fallback", False),
         intent=result.get("intent", "faq"),
+        session_id=result.get("session_id"),
         note=result.get("note"),
         need_slot=result.get("need_slot"),
         debug=result.get("debug"),

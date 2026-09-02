@@ -26,6 +26,7 @@ from openai import OpenAI
 
 from app.config import settings
 from app.agent.intents import Intent, RouteResult
+from app.agent.session_store import SessionContext
 
 
 # ---- 规则降级：关键词词典 ----
@@ -81,14 +82,19 @@ class Router:
         else:
             logger.warning("[Router] LLM_API_KEY 未配置，使用规则降级路由")
 
-    def route(self, query: str) -> RouteResult:
-        """主入口：判断意图 + 抽取槽位"""
+    def route(self, query: str, session: Optional[SessionContext] = None) -> RouteResult:
+        """主入口：判断意图 + 抽取槽位
+
+        参数:
+            query: 用户问题
+            session: 会话上下文（多轮对话时用于槽位续接/继承，可为 None）
+        """
         if self._client is not None:
             try:
                 return self._route_with_llm(query)
             except Exception as e:
                 logger.warning(f"[Router] LLM 路由失败，降级为规则: {e}")
-        return self._route_with_rules(query)
+        return self._route_with_rules(query, session=session)
 
     # ---- LLM 路径 ----
     def _route_with_llm(self, query: str) -> RouteResult:
@@ -127,9 +133,22 @@ class Router:
         )
 
     # ---- 规则降级路径 ----
-    def _route_with_rules(self, query: str) -> RouteResult:
-        """关键词 + 正则的规则路由（无 LLM 时降级）"""
+    def _route_with_rules(self, query: str, session: Optional[SessionContext] = None) -> RouteResult:
+        """关键词 + 正则的规则路由（无 LLM 时降级），支持会话续接"""
         q_lower = query.lower().strip()
+
+        # 0. 会话续接：上一轮在等订单号，这轮给纯数字 → 直接当订单号
+        if session is not None and session.pending_slot == "order_id":
+            candidate = query.strip()
+            if re.fullmatch(r"\d{6,20}", candidate):
+                logger.debug(f"[Router] 会话续接: 纯数字输入 → 工单 (order_id={candidate})")
+                return RouteResult(
+                    intent=Intent.TICKET,
+                    confidence=0.9,
+                    slots={"order_id": candidate},
+                    source="rule",
+                    raw_reason="会话等待订单号，收到纯数字输入",
+                )
 
         # 1. 闲聊检测
         for kw in CHITCHAT_KEYWORDS:
@@ -142,11 +161,12 @@ class Router:
                     raw_reason=f"命中闲聊关键词: {kw}",
                 )
 
-        # 2. 工单检测：业务关键词 + 动作动词
+        # 2. 工单检测：业务关键词 + 动作动词（或已有/可继承的订单号）
         has_ticket_kw = any(kw in query for kw in TICKET_KEYWORDS)
         has_action_verb = any(v in query for v in TICKET_ACTION_VERBS)
         has_question_word = any(w in query for w in FAQ_QUESTION_WORDS)
         order_id = self._extract_order_id(query)
+        session_order_id = session.slots.get("order_id") if session else None
 
         # 含疑问词（如何/怎么）→ 问政策，走 FAQ（即使含业务关键词）
         if has_question_word:
@@ -158,17 +178,21 @@ class Router:
                 raw_reason="命中疑问词，判定为问政策",
             )
 
-        if has_ticket_kw and (has_action_verb or order_id):
+        # 会话中有订单号时，仅命中业务关键词也算工单（如"那订单详情呢"）
+        if has_ticket_kw and (has_action_verb or order_id or session_order_id):
             slots = {}
             if order_id:
                 slots["order_id"] = order_id
-            logger.debug(f"[Router] 规则匹配工单 (order_id={order_id})")
+            reason = "命中业务关键词+动作动词"
+            if not order_id and session_order_id:
+                reason = "命中业务关键词，订单号由会话继承"
+            logger.debug(f"[Router] 规则匹配工单 (order_id={order_id or session_order_id})")
             return RouteResult(
                 intent=Intent.TICKET,
                 confidence=0.6,
                 slots=slots,
                 source="rule",
-                raw_reason="命中业务关键词+动作动词",
+                raw_reason=reason,
             )
 
         # 3. 默认走 FAQ

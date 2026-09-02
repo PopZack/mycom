@@ -335,6 +335,16 @@ class AnswerAgent:
             return message or ""
 
         if status == "rejected":
+            if tool == "apply_refund":
+                advice = ""
+                if "已发货" in error:
+                    advice = _REFUND_ADVICE.get("已发货", "")
+                elif "已签收" in error or "已完成" in error:
+                    advice = _REFUND_ADVICE.get("已完成", "")
+                elif "不存在" in error:
+                    advice = _REFUND_ADVICE.get("不存在", "")
+                if advice:
+                    return f"⚠️ {error}\n建议：{advice}"
             return f"⚠️ {error}"
 
         return ""

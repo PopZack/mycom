@@ -44,10 +44,12 @@ class FAQRetriever:
         self._bm25 = BM25Retriever()
 
         # 1. 加载 Embedding 模型（强制 CPU，避免 CUDA 初始化占用额外内存触发 os error 1455）
+        # local_files_only=True: 只从本地缓存加载，跳过网络检查（hf-mirror.com SSL 偶尔波动）
         logger.info(f"[FAQ] 加载 Embedding 模型: {settings.EMBEDDING_MODEL}")
         self._embed_model = SentenceTransformer(
             settings.EMBEDDING_MODEL,
             device="cpu",
+            local_files_only=True,
         )
         logger.success("[FAQ] Embedding 模型加载完成 ✓")
 

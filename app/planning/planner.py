@@ -28,6 +28,7 @@ from app.config import settings
 from app.agent.intents import Intent
 from app.agent.router import Router
 from app.agent.session_store import SessionContext
+from app.agent.ticket import SUBINTENT_KEYWORDS
 from app.planning.plan import Plan, PlanStep, make_step
 from app.tools.registry import get_tool_registry
 
@@ -289,16 +290,36 @@ class Planner:
         order_id: Optional[str],
         session_order_id: Optional[str],
     ) -> tuple[Optional[str], Dict]:
-        """子查询 → (tool_name, params)"""
-        for verb, tool in VERB_TO_TOOL.items():
-            if verb in sub_query:
-                params: Dict = {}
-                if order_id:
-                    params["order_id"] = order_id
-                elif session_order_id and tool != "query_order":
-                    params["order_id"] = session_order_id
-                return tool, params
-        return None, {}
+        """子查询 → (tool_name, params)
+
+        优先级: 物流/退款 > 查订单（更具体的意图优先）
+        与 ticket.py 的 _detect_subintent 保持一致。
+        """
+        # 1. 物流（最具体，包含查物流/快递到哪/跟踪等）
+        if any(kw in sub_query for kw in SUBINTENT_KEYWORDS["query_logistics"]):
+            tool = "query_logistics"
+        # 2. 退款/退货
+        elif any(kw in sub_query for kw in SUBINTENT_KEYWORDS["refund"]):
+            tool = "apply_refund"
+        # 3. 查订单（兜底）
+        elif any(kw in sub_query for kw in SUBINTENT_KEYWORDS["query_order"]):
+            tool = "query_order"
+        else:
+            # 再试 VERB_TO_TOOL（上面没覆盖到的短语）
+            for verb, t in VERB_TO_TOOL.items():
+                if verb in sub_query:
+                    tool = t
+                    break
+            else:
+                return None, {}
+
+        params: Dict = {}
+        if order_id:
+            params["order_id"] = order_id
+        elif session_order_id and tool != "query_order":
+            params["order_id"] = session_order_id
+
+        return tool, params
 
     def _build_condition(self, condition_text: str) -> str:
         """把自然语言条件转为可执行的条件表达式"""

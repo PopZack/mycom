@@ -92,6 +92,10 @@ class ChatResponse(BaseModel):
     session_id: Optional[str] = None
     note: Optional[str] = None
     need_slot: Optional[str] = None
+    # Phase 3 新增
+    phase3: Optional[bool] = None
+    plan_id: Optional[str] = None
+    clarify_options: Optional[list] = None
     debug: Optional[dict] = None
 
 
@@ -113,7 +117,7 @@ def health():
         "milvus": milvus_ok,
         "milvus_detail": milvus_msg,
         "llm_configured": bool(settings.LLM_API_KEY),
-        "phase": "Phase 2 - Agent Router",
+        "phase": "Phase 2+3 - Agent Routing + Planning",
         "embedding_model": settings.EMBEDDING_MODEL,
         "collection": settings.MILVUS_COLLECTION,
     }
@@ -144,6 +148,9 @@ def chat(req: ChatRequest):
         session_id=result.get("session_id"),
         note=result.get("note"),
         need_slot=result.get("need_slot"),
+        phase3=result.get("phase3"),
+        plan_id=result.get("plan_id"),
+        clarify_options=result.get("clarify_options"),
         debug=result.get("debug"),
     )
     return response
@@ -174,7 +181,7 @@ def root():
     return {
         "name": "mycom 智能问答",
         "version": "0.2.0",
-        "phase": "Phase 2 - Agent Router",
+        "phase": "Phase 2+3 - Agent Routing + Planning",
         "docs": "/docs",
         "health": "/health",
         "routes": ["/chat", "/candidates", "/route"],

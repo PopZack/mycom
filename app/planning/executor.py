@@ -128,6 +128,16 @@ class Executor:
                 self._merge_context(plan, step)
                 logger.info(f"[Executor] step {step.step_id} ✅ {step.tool_name} 成功")
                 idx += 1
+            elif normalized["status"] == "business_rejected":
+                # 业务拒绝: 不重试，标记为 REJECTED，把业务消息传到最终结果
+                step.status = StepStatus.REJECTED
+                step.error = normalized.get("message", "")
+                logger.warning(
+                    f"[Executor] step {step.step_id} ⚠️ {step.tool_name} 业务拒绝: "
+                    f"{normalized.get('message', '')}"
+                )
+                # 业务拒绝不终止计划——后续步骤可能仍然有意义
+                idx += 1
             else:
                 step.error = normalized.get("error", "unknown")
                 # 4. 重试 / 重规划决策
@@ -175,7 +185,7 @@ class Executor:
             "total_steps": plan.total_steps,
             "executed_steps": sum(
                 1 for s in plan.steps
-                if s.status in (StepStatus.SUCCESS, StepStatus.FAILED, StepStatus.SKIPPED)
+                if s.status in (StepStatus.SUCCESS, StepStatus.REJECTED, StepStatus.FAILED, StepStatus.SKIPPED)
             ),
         }
 
@@ -184,7 +194,12 @@ class Executor:
     def _normalize(tool_result: ToolResult, step: PlanStep) -> Dict[str, Any]:
         """把 ToolResult 归一化为统一的 {status, data, error} 协议
 
-        设计: 执行器边界做归一化，不把异构协议分散到各工具实现
+        status 三态:
+          - success: 工具执行成功
+          - business_rejected: 工具执行了但业务规则不允许（如已发货不能退款）
+          - failed: 工具执行失败（网络异常/未知工具/代码错误）
+
+        设计意图: business_rejected 不应该重试——重试改变不了业务规则
         """
         if tool_result.success:
             return {
@@ -193,13 +208,20 @@ class Executor:
                 "message": tool_result.message,
                 "error": "",
             }
-        else:
+        # 关键区分: error 为空 = 业务拒绝；error 非空 = 真正执行失败
+        if not tool_result.error and tool_result.message:
             return {
-                "status": "failed",
+                "status": "business_rejected",
                 "data": {},
                 "message": tool_result.message,
-                "error": tool_result.error or "execution_failed",
+                "error": "",
             }
+        return {
+            "status": "failed",
+            "data": {},
+            "message": tool_result.message,
+            "error": tool_result.error or "execution_failed",
+        }
 
     # ---- 参数占位符解析 ----
     @staticmethod
@@ -368,13 +390,20 @@ class Executor:
 
     @staticmethod
     def _aggregate_answer(plan: Plan) -> str:
-        """聚合所有成功步骤的 message 为自然语言回复"""
+        """聚合所有步骤的 message 为自然语言回复
+
+        包含: SUCCESS 的正常消息 + REJECTED 的业务拒绝消息
+        """
         messages: List[str] = []
         for step in plan.steps:
             if step.status == StepStatus.SUCCESS and step.result:
                 msg = step.result.get("message", "")
                 if msg:
                     messages.append(msg)
+            elif step.status == StepStatus.REJECTED:
+                # 业务拒绝消息存在 step.error 里
+                if step.error:
+                    messages.append(f"⚠️ {step.error}")
             elif step.status == StepStatus.SKIPPED:
                 logger.info(f"[Executor] step {step.step_id} 被跳过: {step.description}")
 

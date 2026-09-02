@@ -22,7 +22,8 @@ class StepStatus(str, Enum):
     PENDING = "pending"       # 等待执行
     RUNNING = "running"       # 执行中
     SUCCESS = "success"       # 执行成功
-    FAILED = "failed"         # 执行失败
+    REJECTED = "rejected"     # 业务规则拒绝（工具执行了但规则不允许）
+    FAILED = "failed"         # 执行失败（网络/代码/未知工具）
     SKIPPED = "skipped"       # 条件未满足，跳过
 
 
@@ -103,7 +104,11 @@ class Plan:
         return len(self.steps)  # 全部成功
 
     def all_success(self) -> bool:
-        return all(s.status == StepStatus.SUCCESS for s in self.steps)
+        # REJECTED 和 SKIPPED 都不算失败——计划跑完了，只是部分步骤业务拒绝或条件不满足
+        return all(
+            s.status in (StepStatus.SUCCESS, StepStatus.REJECTED, StepStatus.SKIPPED)
+            for s in self.steps
+        )
 
     def has_failed(self) -> bool:
         return any(s.status == StepStatus.FAILED for s in self.steps)

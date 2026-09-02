@@ -378,7 +378,7 @@ class Executor:
     # ---- 辅助方法 ----
     @staticmethod
     def _step_summary(step: PlanStep) -> Dict[str, Any]:
-        """步骤摘要（用于对外展示）"""
+        """步骤摘要（用于对外展示 + AnswerAgent 消费）"""
         return {
             "step_id": step.step_id,
             "tool_name": step.tool_name,
@@ -386,6 +386,7 @@ class Executor:
             "status": step.status.value,
             "error": step.error,
             "message": (step.result or {}).get("message", ""),
+            "result": step.result or {},  # 完整归一化结果（含 data）
         }
 
     @staticmethod

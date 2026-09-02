@@ -29,6 +29,7 @@ from app.agent.ticket import TicketChain
 from app.agent.chitchat import ChitchatChain
 from app.chains.faq_chain import FAQChain
 from app.planning import Planner, Executor, PlanStatus
+from app.agents import AnswerAgent
 
 
 # 复合意图连接词（和 Planner 里的规则保持一致）
@@ -74,6 +75,10 @@ class AgentChain:
         logger.info("[Agent] 初始化 Planner + Executor (Phase 3)...")
         self._planner = Planner()
         self._executor = Executor()
+
+        # Phase 3 答案生成 Agent
+        logger.info("[Agent] 初始化 AnswerAgent...")
+        self._answer_agent = AnswerAgent()
 
         logger.success("[Agent] Phase 2+3 全部组件就绪 ✓")
 
@@ -140,6 +145,15 @@ class AgentChain:
             result = self._faq.run(query, include_debug=False)
         elif route.intent == Intent.TICKET:
             result = self._ticket.run(query, slots=route.slots)
+            # Phase 2 TICKET: AnswerAgent 润色单工具结果
+            if result.get("tool_used") and not result.get("need_slot"):
+                result["answer"] = self._answer_agent.compose_single(
+                    tool_name=result["tool_used"],
+                    data=result.get("tool_data", {}),
+                    success=result.get("tool_success", True),
+                    message=result.get("answer", ""),
+                    error="" if result.get("tool_success") else result.get("answer", ""),
+                )
         else:  # CHITCHAT
             result = self._chitchat.run(query)
 
@@ -201,9 +215,15 @@ class AgentChain:
         # 执行计划
         exec_result = self._executor.execute(plan)
 
-        # 聚合输出
+        # 答案生成 Agent 润色（替换 Executor 简单拼接）
+        step_results = exec_result.get("step_results", [])
+        polished_answer = self._answer_agent.compose_multi(
+            step_results=step_results,
+            original_query=query,
+        ) or exec_result.get("answer", "")  # 兜底
+
         return {
-            "answer": exec_result.get("answer", ""),
+            "answer": polished_answer,
             "sources": [],
             "fallback": exec_result.get("final_status") != "success",
             "intent": "ticket",

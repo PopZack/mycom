@@ -193,6 +193,9 @@ class TicketChain:
     # ---- 辅助方法 ----
     def _format_result(self, result: ToolResult, subintent: str) -> Dict[str, Any]:
         """把 ToolResult 格式化为链路统一输出"""
+        # 完整工具数据（供 AnswerAgent 模板化使用）
+        tool_data = result.data if result.success else {}
+
         if not result.success:
             # 订单未找到等失败场景
             return {
@@ -203,9 +206,10 @@ class TicketChain:
                 "subintent": subintent,
                 "tool_used": result.tool_name,
                 "tool_success": False,
+                "tool_data": tool_data,
             }
-        order_id = result.data.get("order_id", "")
-        product = result.data.get("product", "")
+        order_id = tool_data.get("order_id", "")
+        product = tool_data.get("product", "")
         return {
             "answer": result.message,
             "sources": [{"order_id": order_id, "product": product}],
@@ -214,6 +218,7 @@ class TicketChain:
             "subintent": subintent,
             "tool_used": result.tool_name,
             "tool_success": True,
+            "tool_data": tool_data,
         }
 
     def _ask_for_order_id(self, query: str) -> Dict[str, Any]:
